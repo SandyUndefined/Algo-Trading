@@ -1,2 +1,2 @@
 # Trade-AI
-This AI will look into charts and patterns and give signals on plateforms. 
+This AI will look into charts and patterns and give signals on platforms. 
