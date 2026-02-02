@@ -1,0 +1,423 @@
+//@version=5
+indicator("Nifty EMA5 Breakout Alerts [Phase 1 v0.1.0]", shorttitle="Nifty EMA5 P1", overlay=true, max_labels_count=500)
+
+groupCore = "01. Core"
+emaLength = input.int(5, "EMA Length", minval=1, group=groupCore)
+breakoutBufferPoints = input.float(0.0, "Breakout Buffer (points)", minval=0.0, step=0.05, group=groupCore)
+repaintingMode = input.bool(true, "Repainting Mode (default ON)", group=groupCore)
+touchDefinition = input.string("Low <= EMA", "Touch Definition", options=["Low <= EMA", "Crossed EMA (H/L straddle)", "Close <= EMA"], group=groupCore)
+
+groupStopLoss = "02. Stop Loss"
+slMode = input.string("SetupLow", "SL Mode", options=["SetupLow", "FixedPoints", "ATR"], group=groupStopLoss)
+slPoints = input.float(20.0, "SL Points (if FixedPoints)", minval=0.05, step=0.05, group=groupStopLoss)
+atrLength = input.int(14, "ATR Length (if ATR)", minval=1, group=groupStopLoss)
+atrMultiplier = input.float(1.5, "ATR Multiplier (if ATR)", minval=0.1, step=0.1, group=groupStopLoss)
+slExitPriceMode = input.string("SL Price", "SL Exit Fill", options=["SL Price", "Close Price"], group=groupStopLoss)
+
+groupTarget = "03. Target & Shift"
+targetMode = input.string("FixedPoints", "Target Mode", options=["FixedPoints", "RR"], group=groupTarget)
+targetPoints = input.float(40.0, "Target Points (if FixedPoints)", minval=0.05, step=0.05, group=groupTarget)
+targetRR = input.float(2.0, "Target RR (if RR)", minval=0.1, step=0.1, group=groupTarget)
+shiftStepPoints = input.float(10.0, "Both Shift Step Size (points)", minval=0.05, step=0.05, group=groupTarget)
+
+groupRisk = "04. Risk & Limits"
+riskPerTradePoints = input.float(20.0, "Risk Per Trade (points)", minval=0.05, step=0.05, group=groupRisk)
+maxTradesPerDay = input.int(3, "Max Trades per Day", minval=1, maxval=10, group=groupRisk)
+dailyLossLimitPoints = input.float(100.0, "Daily Loss Limit (points)", minval=0.05, step=0.05, group=groupRisk)
+
+groupSession = "05. Session"
+useSessionFilter = input.bool(false, "Enable Session Filter", group=groupSession)
+tradeSession = input.session("0915-1515", "Trading Session (Exchange Time)", group=groupSession)
+
+groupDisplay = "06. Display"
+showGuardrailPanel = input.bool(false, "Show Guardrail Panel", group=groupDisplay)
+showStatusBox = input.bool(true, "Show Compact Status Box", group=groupDisplay)
+showSignalMarkers = input.bool(true, "Show Setup/Entry/Exit Markers", group=groupDisplay)
+showSetupLevelDots = input.bool(false, "Show Setup High/Low Dots", group=groupDisplay)
+showEntryLine = input.bool(true, "Show Entry Line", group=groupDisplay)
+showShiftLabels = input.bool(false, "Show SHIFT Labels", group=groupDisplay)
+
+groupDebug = "07. Debug & Validation"
+debugMode = input.bool(false, "Enable Debug Mode", group=groupDebug)
+showEventLog = input.bool(false, "Show Event Log Labels", group=groupDebug)
+maxEventLogs = input.int(15, "Max Event Log Labels", minval=1, maxval=100, group=groupDebug)
+
+emaValue = ta.ema(close, emaLength)
+plot(emaValue, "EMA", color=color.new(color.teal, 0), linewidth=2)
+
+is15mChart = timeframe.isminutes and timeframe.multiplier == 15
+inSession = not useSessionFilter or not na(time(timeframe.period, tradeSession))
+isSignalBar = repaintingMode or barstate.isconfirmed
+
+var int tradesToday = 0
+var float dailyPnl = 0.0
+var bool tradingDisabledToday = false
+var bool hasActiveTrade = false
+var bool setupReady = false
+
+var float setupHigh = na
+var float setupLow = na
+var int setupBarIndex = na
+var int setupTime = na
+
+var float entryPrice = na
+var int entryBarIndex = na
+var int entryTime = na
+var float stopLossPrice = na
+var float targetPrice = na
+var int shiftCount = 0
+var int tradeId = 0
+var float exitPrice = na
+var float lastTradePnlPoints = na
+var int exitBarIndex = na
+var int exitTime = na
+var float stopHitEntryPrice = na
+var float stopHitSlPrice = na
+var float stopHitTargetPrice = na
+var int lastBuyAlertBar = na
+var int lastStopAlertBar = na
+var int lastShiftAlertBar = na
+var string lastEventType = "NONE"
+var int lastEventBar = na
+var int lastEventTime = na
+var float lastEventEntry = na
+var float lastEventSl = na
+var float lastEventTarget = na
+var float lastEventExit = na
+var float lastEventPnl = na
+var line entryLine = na
+var line stopLossLine = na
+var line targetLine = na
+var label[] eventLogLabels = array.new_label()
+
+addEventLog(_text, _y, _bgColor) =>
+    if showEventLog
+        newLabel = label.new(bar_index, _y, _text, xloc=xloc.bar_index, style=label.style_label_left, textcolor=color.white, color=_bgColor, size=size.tiny)
+        array.push(eventLogLabels, newLabel)
+        if array.size(eventLogLabels) > maxEventLogs
+            oldLabel = array.shift(eventLogLabels)
+            label.delete(oldLabel)
+
+isNewTradingDay = ta.change(time("D")) != 0
+if isNewTradingDay
+    tradesToday := 0
+    dailyPnl := 0.0
+    tradingDisabledToday := false
+    hasActiveTrade := false
+    setupReady := false
+    setupHigh := na
+    setupLow := na
+    setupBarIndex := na
+    setupTime := na
+    entryPrice := na
+    entryBarIndex := na
+    entryTime := na
+    stopLossPrice := na
+    targetPrice := na
+    shiftCount := 0
+    exitPrice := na
+    exitBarIndex := na
+    exitTime := na
+    stopHitEntryPrice := na
+    stopHitSlPrice := na
+    stopHitTargetPrice := na
+    if not na(entryLine)
+        line.delete(entryLine)
+        entryLine := na
+    if not na(stopLossLine)
+        line.delete(stopLossLine)
+        stopLossLine := na
+    if not na(targetLine)
+        line.delete(targetLine)
+        targetLine := na
+
+if not showEventLog and array.size(eventLogLabels) > 0
+    for i = 0 to array.size(eventLogLabels) - 1
+        label.delete(array.get(eventLogLabels, i))
+    array.clear(eventLogLabels)
+
+isLockedOutByDailyLimits = tradesToday >= maxTradesPerDay or tradingDisabledToday
+
+touchesEmaForBullishSetup = switch touchDefinition
+    "Low <= EMA" => low <= emaValue
+    "Crossed EMA (H/L straddle)" => low <= emaValue and high >= emaValue
+    => close <= emaValue
+
+isStrictNextCandle = setupReady and not na(setupBarIndex) and bar_index == setupBarIndex + 1
+doesTriggerBreakSetupHigh = setupReady and not na(setupHigh) and high > setupHigh + breakoutBufferPoints
+isTriggerCandle = isSignalBar and not hasActiveTrade and not isLockedOutByDailyLimits and inSession and isStrictNextCandle and doesTriggerBreakSetupHigh
+
+if isTriggerCandle
+    entryPrice := setupHigh + breakoutBufferPoints
+    stopLossPrice := switch slMode
+        "SetupLow" => setupLow
+        "FixedPoints" => entryPrice - slPoints
+        => entryPrice - ta.atr(atrLength) * atrMultiplier
+    riskDistance = math.max(entryPrice - stopLossPrice, syminfo.mintick)
+    targetPrice := switch targetMode
+        "FixedPoints" => entryPrice + targetPoints
+        => entryPrice + riskDistance * targetRR
+    shiftCount := 0
+    tradeId += 1
+    entryBarIndex := bar_index
+    entryTime := time
+    hasActiveTrade := true
+    setupReady := false
+    tradesToday += 1
+    if not na(entryLine)
+        line.delete(entryLine)
+    if not na(stopLossLine)
+        line.delete(stopLossLine)
+    if not na(targetLine)
+        line.delete(targetLine)
+    entryLine := line.new(entryBarIndex, entryPrice, bar_index, entryPrice, xloc=xloc.bar_index, extend=extend.none, color=color.new(color.blue, 0), width=2)
+    stopLossLine := line.new(entryBarIndex, stopLossPrice, bar_index, stopLossPrice, xloc=xloc.bar_index, extend=extend.none, color=color.new(color.red, 0), width=2)
+    targetLine := line.new(entryBarIndex, targetPrice, bar_index, targetPrice, xloc=xloc.bar_index, extend=extend.none, color=color.new(color.green, 0), width=2)
+    lastEventType := "ENTRY"
+    lastEventBar := bar_index
+    lastEventTime := time
+    lastEventEntry := entryPrice
+    lastEventSl := stopLossPrice
+    lastEventTarget := targetPrice
+    lastEventExit := na
+    lastEventPnl := na
+    addEventLog("ENTRY #" + str.tostring(tradeId) + " E:" + str.tostring(entryPrice, "#.##") + " SL:" + str.tostring(stopLossPrice, "#.##") + " T:" + str.tostring(targetPrice, "#.##"), low, color.rgb(41, 104, 163))
+
+isStopHit = hasActiveTrade and isSignalBar and not na(stopLossPrice) and low <= stopLossPrice
+if isStopHit
+    stopHitEntryPrice := entryPrice
+    stopHitSlPrice := stopLossPrice
+    stopHitTargetPrice := targetPrice
+    exitPrice := slExitPriceMode == "Close Price" ? close : stopLossPrice
+    lastTradePnlPoints := exitPrice - entryPrice
+    dailyPnl += lastTradePnlPoints
+    if dailyPnl <= -dailyLossLimitPoints
+        tradingDisabledToday := true
+    exitBarIndex := bar_index
+    exitTime := time
+    lastEventType := "EXIT_SL"
+    lastEventBar := bar_index
+    lastEventTime := time
+    lastEventEntry := stopHitEntryPrice
+    lastEventSl := stopHitSlPrice
+    lastEventTarget := stopHitTargetPrice
+    lastEventExit := exitPrice
+    lastEventPnl := lastTradePnlPoints
+    addEventLog("EXIT-SL #" + str.tostring(tradeId) + " Exit:" + str.tostring(exitPrice, "#.##") + " PnL:" + str.tostring(lastTradePnlPoints, "#.##"), high, color.rgb(148, 51, 51))
+
+    hasActiveTrade := false
+    setupReady := false
+    setupHigh := na
+    setupLow := na
+    setupBarIndex := na
+    setupTime := na
+    entryPrice := na
+    entryBarIndex := na
+    entryTime := na
+    stopLossPrice := na
+    targetPrice := na
+    shiftCount := 0
+
+    if not na(entryLine)
+        line.delete(entryLine)
+        entryLine := na
+    if not na(stopLossLine)
+        line.delete(stopLossLine)
+        stopLossLine := na
+    if not na(targetLine)
+        line.delete(targetLine)
+        targetLine := na
+
+int shiftAppliedOnBar = 0
+if hasActiveTrade and isSignalBar and not na(targetPrice) and high >= targetPrice and shiftStepPoints > 0
+    shiftsToApply = int(math.floor((high - targetPrice) / shiftStepPoints)) + 1
+    shiftDelta = shiftStepPoints * shiftsToApply
+    stopLossPrice += shiftDelta
+    targetPrice += shiftDelta
+    shiftCount += shiftsToApply
+    shiftAppliedOnBar := shiftsToApply
+    lastEventType := "SHIFT"
+    lastEventBar := bar_index
+    lastEventTime := time
+    lastEventEntry := entryPrice
+    lastEventSl := stopLossPrice
+    lastEventTarget := targetPrice
+    lastEventExit := na
+    lastEventPnl := na
+    addEventLog("SHIFT +" + str.tostring(shiftsToApply) + " | SL:" + str.tostring(stopLossPrice, "#.##") + " T:" + str.tostring(targetPrice, "#.##"), high, color.rgb(21, 112, 73))
+    if showShiftLabels
+        label.new(bar_index, high, "SHIFT #" + str.tostring(shiftCount), style=label.style_label_up, textcolor=color.white, color=color.rgb(21, 112, 73), size=size.tiny)
+
+if hasActiveTrade and not na(entryBarIndex)
+    if showEntryLine
+        if na(entryLine)
+            entryLine := line.new(entryBarIndex, entryPrice, bar_index, entryPrice, xloc=xloc.bar_index, extend=extend.none, color=color.new(color.blue, 0), width=2)
+        line.set_xy1(entryLine, entryBarIndex, entryPrice)
+        line.set_xy2(entryLine, bar_index, entryPrice)
+    else
+        if not na(entryLine)
+            line.delete(entryLine)
+            entryLine := na
+
+    if na(stopLossLine)
+        stopLossLine := line.new(entryBarIndex, stopLossPrice, bar_index, stopLossPrice, xloc=xloc.bar_index, extend=extend.none, color=color.new(color.red, 0), width=2)
+    line.set_xy1(stopLossLine, entryBarIndex, stopLossPrice)
+    line.set_xy2(stopLossLine, bar_index, stopLossPrice)
+
+    if na(targetLine)
+        targetLine := line.new(entryBarIndex, targetPrice, bar_index, targetPrice, xloc=xloc.bar_index, extend=extend.none, color=color.new(color.green, 0), width=2)
+    line.set_xy1(targetLine, entryBarIndex, targetPrice)
+    line.set_xy2(targetLine, bar_index, targetPrice)
+
+isSetupExpired = setupReady and not na(setupBarIndex) and bar_index > setupBarIndex + 1
+if isSetupExpired
+    setupReady := false
+
+canScanForSetup = isSignalBar and not hasActiveTrade and not isLockedOutByDailyLimits and inSession and not setupReady and not isStopHit
+isBullishSetupCandle = canScanForSetup and not touchesEmaForBullishSetup
+
+if isBullishSetupCandle
+    setupHigh := high
+    setupLow := low
+    setupBarIndex := bar_index
+    setupTime := time
+    setupReady := true
+
+rawBuyAlertEvent = isTriggerCandle
+buyAlertEvent = rawBuyAlertEvent and (na(lastBuyAlertBar) or bar_index != lastBuyAlertBar)
+if buyAlertEvent
+    lastBuyAlertBar := bar_index
+
+rawStopAlertEvent = isStopHit
+stopAlertEvent = rawStopAlertEvent and (na(lastStopAlertBar) or bar_index != lastStopAlertBar)
+if stopAlertEvent
+    lastStopAlertBar := bar_index
+
+rawShiftAlertEvent = shiftAppliedOnBar > 0
+shiftAlertEvent = rawShiftAlertEvent and (na(lastShiftAlertBar) or bar_index != lastShiftAlertBar)
+if shiftAlertEvent
+    lastShiftAlertBar := bar_index
+
+buyAlertEntry = buyAlertEvent ? entryPrice : na
+buyAlertSl = buyAlertEvent ? stopLossPrice : na
+buyAlertTarget = buyAlertEvent ? targetPrice : na
+
+stopAlertEntry = stopAlertEvent ? stopHitEntryPrice : na
+stopAlertSl = stopAlertEvent ? stopHitSlPrice : na
+stopAlertTarget = stopAlertEvent ? stopHitTargetPrice : na
+stopAlertExit = stopAlertEvent ? exitPrice : na
+stopAlertPnl = stopAlertEvent ? lastTradePnlPoints : na
+
+shiftAlertSl = shiftAlertEvent ? stopLossPrice : na
+shiftAlertTarget = shiftAlertEvent ? targetPrice : na
+shiftAlertCount = shiftAlertEvent ? float(shiftCount) : na
+shiftAlertApplied = shiftAlertEvent ? float(shiftAppliedOnBar) : na
+
+plot(buyAlertEntry, "A_BUY_ENTRY", display=display.none)
+plot(buyAlertSl, "A_BUY_SL", display=display.none)
+plot(buyAlertTarget, "A_BUY_TARGET", display=display.none)
+plot(stopAlertEntry, "A_STOP_ENTRY", display=display.none)
+plot(stopAlertSl, "A_STOP_SL", display=display.none)
+plot(stopAlertTarget, "A_STOP_TARGET", display=display.none)
+plot(stopAlertExit, "A_STOP_EXIT", display=display.none)
+plot(stopAlertPnl, "A_STOP_PNL", display=display.none)
+plot(shiftAlertSl, "A_SHIFT_SL", display=display.none)
+plot(shiftAlertTarget, "A_SHIFT_TARGET", display=display.none)
+plot(shiftAlertCount, "A_SHIFT_COUNT", display=display.none)
+plot(shiftAlertApplied, "A_SHIFT_APPLIED", display=display.none)
+plot(riskPerTradePoints, "A_RISK_PER_TRADE", display=display.none)
+plot(float(tradesToday), "A_TRADES_TODAY", display=display.none)
+
+alertcondition(buyAlertEvent, "Buy Trigger", "BUY | {{ticker}} {{interval}} | Entry={{plot(\"A_BUY_ENTRY\")}} | SL={{plot(\"A_BUY_SL\")}} | Target={{plot(\"A_BUY_TARGET\")}} | RiskInput={{plot(\"A_RISK_PER_TRADE\")}} | TradesToday={{plot(\"A_TRADES_TODAY\")}}")
+alertcondition(stopAlertEvent, "SL Hit Exit", "EXIT-SL | {{ticker}} {{interval}} | Entry={{plot(\"A_STOP_ENTRY\")}} | SL={{plot(\"A_STOP_SL\")}} | TargetAtExit={{plot(\"A_STOP_TARGET\")}} | Exit={{plot(\"A_STOP_EXIT\")}} | PnL={{plot(\"A_STOP_PNL\")}} | TradesToday={{plot(\"A_TRADES_TODAY\")}}")
+alertcondition(shiftAlertEvent, "Target Shift", "SHIFT | {{ticker}} {{interval}} | SL={{plot(\"A_SHIFT_SL\")}} | Target={{plot(\"A_SHIFT_TARGET\")}} | ShiftCount={{plot(\"A_SHIFT_COUNT\")}} | StepsThisBar={{plot(\"A_SHIFT_APPLIED\")}} | TradesToday={{plot(\"A_TRADES_TODAY\")}}")
+
+statusState = not is15mChart ? "WRONG TF" : tradingDisabledToday ? "DISABLED" : useSessionFilter and not inSession ? "OUT OF SESSION" : hasActiveTrade ? "IN TRADE" : setupReady ? "SETUP READY" : "SCANNING"
+statusStateBg = not is15mChart ? color.rgb(161, 94, 0) : tradingDisabledToday ? color.rgb(148, 51, 51) : useSessionFilter and not inSession ? color.rgb(78, 78, 78) : hasActiveTrade ? color.rgb(35, 95, 71) : setupReady ? color.rgb(52, 98, 152) : color.rgb(43, 67, 96)
+flowState = isStopHit ? "EXIT (SL)" : isTriggerCandle ? "ENTRY" : shiftAlertEvent ? "SHIFT x" + str.tostring(shiftAppliedOnBar) : isBullishSetupCandle ? "SETUP" : "IDLE"
+
+plotshape(showSignalMarkers and isBullishSetupCandle, "Setup Candle", style=shape.triangleup, location=location.belowbar, size=size.tiny, color=color.new(color.lime, 0), text="SETUP")
+plot(showSetupLevelDots and isBullishSetupCandle ? high : na, "Setup High", style=plot.style_circles, linewidth=2, color=color.new(color.lime, 0))
+plot(showSetupLevelDots and isBullishSetupCandle ? low : na, "Setup Low", style=plot.style_circles, linewidth=2, color=color.new(color.red, 0))
+plotshape(showSignalMarkers and isTriggerCandle, "Buy Trigger", style=shape.labelup, location=location.abovebar, size=size.tiny, color=color.new(color.blue, 0), text="ENTRY")
+plotshape(showSignalMarkers and isStopHit, "Stop Exit", style=shape.labeldown, location=location.abovebar, size=size.tiny, color=color.new(color.red, 0), text="EXIT")
+plotshape(showSignalMarkers and shiftAlertEvent, "Shift Event", style=shape.circle, location=location.abovebar, size=size.tiny, color=color.new(color.green, 0), text="SHF")
+
+bgcolor(useSessionFilter and not inSession ? color.new(color.gray, 92) : na, title="Outside Session")
+
+var table statusBox = table.new(position.top_left, 1, 12, border_width=1)
+var table guardrailPanel = table.new(position.top_right, 1, 14, border_width=1)
+
+if barstate.islast
+    table.clear(statusBox, 0, 0, 0, 11)
+    if showStatusBox
+        int srow = 0
+        table.cell(statusBox, 0, srow, "STATE: " + statusState, text_color=color.white, bgcolor=statusStateBg)
+        srow += 1
+        table.cell(statusBox, 0, srow, "FLOW: " + flowState, text_color=color.white, bgcolor=color.rgb(53, 53, 53))
+        srow += 1
+        table.cell(statusBox, 0, srow, "TRADES: " + str.tostring(tradesToday) + "/" + str.tostring(maxTradesPerDay), text_color=color.white, bgcolor=color.rgb(43, 67, 96))
+        srow += 1
+        table.cell(statusBox, 0, srow, "DAILY PNL: " + str.tostring(dailyPnl, "#.##") + " pts", text_color=color.white, bgcolor=dailyPnl < 0 ? color.rgb(125, 56, 56) : color.rgb(35, 95, 71))
+        srow += 1
+        if setupReady and not hasActiveTrade
+            table.cell(statusBox, 0, srow, "SETUP H/L: " + str.tostring(setupHigh, "#.##") + " / " + str.tostring(setupLow, "#.##"), text_color=color.white, bgcolor=color.rgb(52, 98, 152))
+            srow += 1
+        if hasActiveTrade
+            table.cell(statusBox, 0, srow, "TRADE #" + str.tostring(tradeId) + " | SHIFTS: " + str.tostring(shiftCount), text_color=color.white, bgcolor=color.rgb(35, 95, 71))
+            srow += 1
+            table.cell(statusBox, 0, srow, "E/SL/T: " + str.tostring(entryPrice, "#.##") + " / " + str.tostring(stopLossPrice, "#.##") + " / " + str.tostring(targetPrice, "#.##"), text_color=color.white, bgcolor=color.rgb(35, 95, 71))
+            srow += 1
+        if tradingDisabledToday
+            table.cell(statusBox, 0, srow, "DISABLED: Daily loss limit hit", text_color=color.white, bgcolor=color.rgb(148, 51, 51))
+            srow += 1
+        if debugMode
+            table.cell(statusBox, 0, srow, "DEBUG Last: " + lastEventType + " @bar " + (na(lastEventBar) ? "na" : str.tostring(lastEventBar)), text_color=color.white, bgcolor=color.rgb(57, 57, 90))
+            srow += 1
+            table.cell(statusBox, 0, srow, "D E/SL/T: " + str.tostring(lastEventEntry, "#.##") + " / " + str.tostring(lastEventSl, "#.##") + " / " + str.tostring(lastEventTarget, "#.##"), text_color=color.white, bgcolor=color.rgb(57, 57, 90))
+            srow += 1
+            table.cell(statusBox, 0, srow, "D Exit/PnL: " + str.tostring(lastEventExit, "#.##") + " / " + str.tostring(lastEventPnl, "#.##"), text_color=color.white, bgcolor=color.rgb(57, 57, 90))
+
+    table.clear(guardrailPanel, 0, 0, 0, 13)
+    if showGuardrailPanel
+        int row = 0
+
+        table.cell(guardrailPanel, 0, row, "[STAT] Trades Today: " + str.tostring(tradesToday) + "/" + str.tostring(maxTradesPerDay), text_color=color.white, bgcolor=color.rgb(43, 67, 96))
+        row += 1
+        table.cell(guardrailPanel, 0, row, "[STAT] Daily PnL (pts): " + str.tostring(dailyPnl, "#.##"), text_color=color.white, bgcolor=dailyPnl < 0 ? color.rgb(125, 56, 56) : color.rgb(35, 95, 71))
+        row += 1
+        table.cell(guardrailPanel, 0, row, "[STAT] Trading Disabled Today: " + (tradingDisabledToday ? "YES" : "NO"), text_color=color.white, bgcolor=tradingDisabledToday ? color.rgb(148, 51, 51) : color.rgb(35, 95, 71))
+        row += 1
+
+        if not is15mChart
+            table.cell(guardrailPanel, 0, row, "[WARN] Use 15m timeframe for this setup.", text_color=color.white, bgcolor=color.rgb(161, 94, 0))
+            row += 1
+
+        if maxTradesPerDay < 2 or maxTradesPerDay > 3
+            table.cell(guardrailPanel, 0, row, "[INFO] Typical goal is 2-3 trades/day.", text_color=color.white, bgcolor=color.rgb(52, 98, 152))
+            row += 1
+
+        if useSessionFilter and not inSession
+            table.cell(guardrailPanel, 0, row, "[INFO] Outside configured session.", text_color=color.white, bgcolor=color.rgb(78, 78, 78))
+            row += 1
+
+        if dailyLossLimitPoints < riskPerTradePoints
+            table.cell(guardrailPanel, 0, row, "[WARN] Daily loss limit is below risk per trade.", text_color=color.white, bgcolor=color.rgb(161, 94, 0))
+            row += 1
+
+        if tradesToday >= maxTradesPerDay
+            table.cell(guardrailPanel, 0, row, "[INFO] Max trades/day reached. New entries blocked.", text_color=color.white, bgcolor=color.rgb(78, 78, 78))
+            row += 1
+
+        if tradingDisabledToday
+            table.cell(guardrailPanel, 0, row, "[WARN] Daily loss limit breached. Trading disabled for today.", text_color=color.white, bgcolor=color.rgb(148, 51, 51))
+            row += 1
+
+        if hasActiveTrade
+            table.cell(guardrailPanel, 0, row, "[INFO] Active trade: setup scan paused.", text_color=color.white, bgcolor=color.rgb(78, 78, 78))
+            row += 1
+            table.cell(guardrailPanel, 0, row, "[INFO] Trade #" + str.tostring(tradeId) + " | ShiftCount=" + str.tostring(shiftCount), text_color=color.white, bgcolor=color.rgb(78, 78, 78))
+            row += 1
+
+        if row == 3
+            table.cell(guardrailPanel, 0, row, "[OK] Guardrails passed.", text_color=color.white, bgcolor=color.rgb(20, 117, 63))
