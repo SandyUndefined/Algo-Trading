@@ -36,6 +36,7 @@ showSignalMarkers = input.bool(true, "Show Entry/Exit Markers", group=groupDispl
 showSetupLevelDots = input.bool(false, "Show Setup High/Low Dots", group=groupDisplay)
 showEntryLine = input.bool(true, "Show Entry Line", group=groupDisplay)
 showShiftLabels = input.bool(false, "Show SHIFT Labels", group=groupDisplay)
+signalLabelOffsetPoints = input.float(20.0, "Signal Label Offset (points)", minval=0.0, step=0.05, group=groupDisplay)
 
 groupDebug = "07. Debug & Validation"
 debugMode = input.bool(false, "Enable Debug Mode", group=groupDebug)
@@ -344,10 +345,13 @@ flowState = isStopHit ? "EXIT (SL)" : isTriggerCandle ? "ENTRY" : shiftAlertEven
 plot(showSetupLevelDots and setupJustActivated ? high : na, "Setup High", style=plot.style_circles, linewidth=2, color=color.new(color.lime, 0))
 plot(showSetupLevelDots and setupJustActivated ? low : na, "Setup Low", style=plot.style_circles, linewidth=2, color=color.new(color.red, 0))
 
-if showSignalMarkers and buyAlertEvent and not na(buyAlertEntry)
-    label.new(bar_index, high, "BUY\nE:" + str.tostring(buyAlertEntry, "#.##") + " SL:" + str.tostring(buyAlertSl, "#.##") + " T:" + str.tostring(buyAlertTarget, "#.##"), style=label.style_label_up, textcolor=color.white, color=color.new(color.blue, 0), size=size.small)
-if showSignalMarkers and stopAlertEvent and not na(stopAlertExit)
-    label.new(bar_index, low, "SELL\nExit:" + str.tostring(stopAlertExit, "#.##") + " PnL:" + str.tostring(stopAlertPnl, "#.##"), style=label.style_label_down, textcolor=color.white, color=color.new(color.red, 0), size=size.small)
+buyLabelY = high + signalLabelOffsetPoints
+sellLabelY = low - signalLabelOffsetPoints
+
+if showSignalMarkers and buyAlertEvent and not na(buyAlertEntry) and not na(buyAlertSl) and not na(buyAlertTarget)
+    label.new(bar_index, buyLabelY, "BUY\nE:" + str.tostring(buyAlertEntry, "#.##") + " SL:" + str.tostring(buyAlertSl, "#.##") + " T:" + str.tostring(buyAlertTarget, "#.##"), yloc=yloc.price, style=label.style_label_up, textcolor=color.white, color=color.new(color.blue, 0), size=size.small)
+if showSignalMarkers and stopAlertEvent and not na(stopAlertExit) and not na(stopAlertPnl)
+    label.new(bar_index, sellLabelY, "SELL\nExit:" + str.tostring(stopAlertExit, "#.##") + " PnL:" + str.tostring(stopAlertPnl, "#.##"), yloc=yloc.price, style=label.style_label_down, textcolor=color.white, color=color.new(color.red, 0), size=size.small)
 
 bgcolor(useSessionFilter and not inSession ? color.new(color.gray, 92) : na, title="Outside Session")
 
